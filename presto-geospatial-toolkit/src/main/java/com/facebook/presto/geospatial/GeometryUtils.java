@@ -17,7 +17,6 @@ import com.esri.core.geometry.Envelope;
 import com.esri.core.geometry.Geometry;
 import com.esri.core.geometry.GeometryCursor;
 import com.esri.core.geometry.GeometryMemorySizeUtilsPackageWorkaround;
-import com.esri.core.geometry.SpatialReference;
 import com.esri.core.geometry.ogc.OGCConcreteGeometryCollection;
 import com.esri.core.geometry.ogc.OGCGeometry;
 import com.google.common.base.Verify;
@@ -44,7 +43,57 @@ public final class GeometryUtils
 
     public enum GeometryTypeName
     {
-        POINT, MULTI_POINT, LINE_STRING, MULTI_LINE_STRING, POLYGON, MULTI_POLYGON, GEOMETRY_COLLECTION
+        POINT {
+            @Override
+            public byte getCode()
+            {
+                return 0;
+            }
+        },
+        MULTI_POINT {
+            @Override
+            public byte getCode()
+            {
+                return 1;
+            }
+        },
+        LINE_STRING {
+            @Override
+            public byte getCode()
+            {
+                return 2;
+            }
+        },
+        MULTI_LINE_STRING {
+            @Override
+            public byte getCode()
+            {
+                return 3;
+            }
+        },
+        POLYGON {
+            @Override
+            public byte getCode()
+            {
+                return 4;
+            }
+        },
+        MULTI_POLYGON {
+            @Override
+            public byte getCode()
+            {
+                return 5;
+            }
+        },
+        GEOMETRY_COLLECTION {
+            @Override
+            public byte getCode()
+            {
+                return 6;
+            }
+        };
+
+        public abstract byte getCode();
     }
 
     public static final String POINT = "Point";
@@ -77,6 +126,28 @@ public final class GeometryUtils
                 return GeometryTypeName.GEOMETRY_COLLECTION;
             default:
                 throw new IllegalArgumentException("Invalid Geometry Type: " + type);
+        }
+    }
+
+    public static GeometryTypeName valueOf(byte code)
+    {
+        switch (code) {
+            case 0:
+                return GeometryTypeName.POINT;
+            case 1:
+                return GeometryTypeName.MULTI_POINT;
+            case 2:
+                return GeometryTypeName.LINE_STRING;
+            case 3:
+                return GeometryTypeName.MULTI_LINE_STRING;
+            case 4:
+                return GeometryTypeName.POLYGON;
+            case 5:
+                return GeometryTypeName.MULTI_POLYGON;
+            case 6:
+                return GeometryTypeName.GEOMETRY_COLLECTION;
+            default:
+                throw new IllegalArgumentException("Invalid Geometry Code: " + code);
         }
     }
 
@@ -152,37 +223,47 @@ public final class GeometryUtils
         }
         BasicSliceInput input = shape.getInput();
 
-        int spatialReferenceId = input.readInt();
-        SpatialReference spatialReference = null;
-        if (spatialReferenceId != SPATIAL_REFERENCE_UNKNOWN) {
-            spatialReference = SpatialReference.create(spatialReferenceId);
-        }
-
         // GeometryCollection: spatialReferenceId|len-of-shape1|bytes-of-shape1|len-of-shape2|bytes-of-shape2...
         List<OGCGeometry> geometries = new ArrayList<>();
-        while (input.available() > 0) {
-            int length = input.readInt();
-            ByteBuffer buffer = input.readSlice(length).toByteBuffer().slice().order(LITTLE_ENDIAN);
-            Geometry esriGeometry = local().execute(0, Unknown, buffer);
-            OGCGeometry geometry = createFromEsriGeometry(esriGeometry, spatialReference);
-            geometries.add(geometry);
+
+        if (input.available() > 0) {
+            byte code = input.readByte();
+            while (input.available() > 0) {
+                OGCGeometry geometry = extractGeometry(code, input);
+
+                geometries.add(geometry);
+            }
         }
 
         if (geometries.isEmpty()) {
-            return new OGCConcreteGeometryCollection(emptyList(), spatialReference);
+            return new OGCConcreteGeometryCollection(emptyList(), null);
         }
         else if (geometries.size() == 1) {
             return geometries.get(0);
         }
-        return new OGCConcreteGeometryCollection(geometries, spatialReference);
+        return new OGCConcreteGeometryCollection(geometries, null);
+    }
+
+    private static OGCGeometry extractGeometry(byte code, BasicSliceInput input)
+    {
+        GeometryTypeName geometryTypeName = valueOf(code);
+        int length;
+        if (geometryTypeName == GeometryTypeName.GEOMETRY_COLLECTION) {
+            length = input.readInt();
+        }
+        else {
+            length = (int) input.length() - 1;
+        }
+        ByteBuffer buffer = input.readSlice(length).toByteBuffer().slice().order(LITTLE_ENDIAN);
+        Geometry esriGeometry = local().execute(0, Unknown, buffer);
+        return createFromEsriGeometry(esriGeometry, null);
     }
 
     public static Slice serialize(OGCGeometry input)
     {
-        int spatialReferenceId = input.SRID();
         DynamicSliceOutput sliceOutput = new DynamicSliceOutput(100);
-        sliceOutput.appendInt(spatialReferenceId);
 
+        sliceOutput.appendByte(valueOf(input.geometryType()).getCode());
         GeometryCursor cursor = input.getEsriGeometryCursor();
         while (true) {
             Geometry geometry = cursor.next();
@@ -190,7 +271,9 @@ public final class GeometryUtils
                 break;
             }
             byte[] shape = geometryToEsriShape(geometry);
-            sliceOutput.appendInt(shape.length);
+            if (input.geometryType().equals(GEOMETRY_COLLECTION)) {
+                sliceOutput.appendInt(shape.length);
+            }
             sliceOutput.appendBytes(shape);
         }
         return sliceOutput.slice();
